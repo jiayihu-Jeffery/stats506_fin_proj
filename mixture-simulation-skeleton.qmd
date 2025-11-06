@@ -1,0 +1,595 @@
+---
+title: "OLS under Normal–Nonnormal Mixtures: Proposal & Simulation Plan"
+author: "Jiayi Hu"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+  pdf:
+    toc: true
+    number-sections: true
+  docx: default
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+editor: source
+freeze: auto
+# bibliography: references.bib   # TODO: add if you will cite
+---
+
+# Abstract
+
+<!-- TODO: 3–5 sentences: problem, what varies (π and nonnormal family), what is measured (bias/var/MSE, type I error, power, coverage), and the key takeaways you expect. -->
+
+# 1. Model (Baseline)
+
+> **Write here**: Define the baseline linear model and the covariate distribution.
+
+- Baseline model: $Y_i = \beta_0 + X_i^\top \beta + \varepsilon_i$, with $E[\varepsilon_i\mid X_i]=0$.
+- Covariates: $X_i \sim \mathcal N_d(m, \Sigma)$; note the choices for $d$ and $\Sigma$.
+- Mixture idea: $Y\mid X$ is a two-component mixture (Normal vs. nonnormal) **sharing the same mean** $\mu_i=\beta_0+X_i^\top\beta$.
+
+# 2. Research Questions (fixed)
+
+> **Write here**: Restate the three questions concisely.
+
+1. Is the OLS slope $\hat\beta_1$ unbiased? How do its variance and MSE change as $\pi\in[0,1]$ varies?
+2. How do type I error (at $\alpha=0.05$) and statistical power (t tests) change?
+3. Do discrete/skewed/heavy-tailed families differ in impact?
+
+# 3. Model Variants and Inference Targets
+
+> **Write here**: Enumerate the variants to be studied and the inference methods.
+
+- **Variants of the nonnormal component**: Poisson (primary), then NegBin, Gamma, Lognormal, Laplace, $t_\nu$, Uniform; ZIP for excess zeros.
+- **Tests for $\hat\beta$**: (a) classical OLS t; (b) heteroskedasticity-robust t (HC3); (c) permutation tests — Freedman–Lane (continuous-only), label permutation (binary $T$).
+- **Optional baselines**: robust regression (Huber M, quantile), simple transforms (Anscombe, $\log(Y+c)$), diagnostics (outliers/leverage).
+
+# 4. Data-Generating Process (DGP)
+
+## 4.1 Covariate design
+
+> **Write here**: Choose $d\in\{2,5,10\}$; specify $m$ and $\Sigma$ families (Identity, AR(1) with $\rho\in\{0.3,0.7\}$, Equicorrelated with $\rho=0.3$). State sparse vs. dense $\beta$ and use $\beta_0=4$ to keep $\mu_i>0$.
+
+## 4.2 Mixture response
+
+> **Write here**: Define $Z_i\sim\mathrm{Bernoulli}(\pi)$ and the two components.
+
+- If $Z_i=1$: $Y_i\sim\mathcal N(\mu_i,\sigma^2)$ (use $\sigma^2=1$ by default).
+- If $Z_i=0$: $Y_i\sim \text{Alt}(\mu_i;\text{family-specific})$; parameterize to keep mean=$\mu_i$.
+
+## 4.3 Grid of scenarios
+
+> **Write here**: List $n\in\{100,300,1000\}$; $d\in\{2,5,10\}$; $\Sigma$ options; $\pi\in\{0,0.25,0.5,0.75,1\}$; replications $R=2000$ (optionally 5000); seeds.
+
+# 5. Methods and Tests
+
+> **Write here**: What is estimated and compared.
+
+- Working estimator: OLS for $Y\sim X$, focus on $\hat\beta_1$.
+- Tests: classical t; HC3-robust t; permutation (Freedman–Lane vs. label-reshuffle, as appropriate).
+- Report: bias/variance/MSE; type I error (when $\beta_1=0$); power (when $\beta_1>0$); 95% CI coverage (classical vs. HC3).
+
+# 6. Simulation Pipeline (Step-by-step)
+
+> **Write here**: Describe the full Monte Carlo loop, storage, and plotting plan.
+
+1. Loop over grid $(n,d,\Sigma,\pi)$.
+2. Draw $X$, compute $\mu$, draw $Z$, simulate $Y$ (Normal vs. Alt family).
+3. Fit OLS; compute classical and HC3 SEs; run permutation test (choose variant).
+4. Repeat $R$ times; aggregate metrics.
+5. Plot curves (Power/Coverage/RMSE vs. $\pi$); show representative diagnostics.
+
+# 7. Primary Results: Poisson Mixture
+
+> **Write here**: State what figures/tables will appear and how to read them.
+
+- Figures: Power–$\pi$, Coverage–$\pi$, RMSE–$\pi$ (faceted by $n$, $d$, $\Sigma$).
+- Diagnostics: residual–fitted, share with $|r_i|>3$, Cook’s distance vs. $\pi$.
+
+# 8. Multi-family Extensions
+
+> **Write here**: Repeat Section 7 for NegBin, Gamma, Lognormal, Laplace, $t_\nu$, Uniform; add ZIP. For positive-valued families include GLM benchmarks (log link).
+
+# 9. Design Extensions (E6)
+
+> **Write here**: (i) treatment imbalance 0.5/0.5 vs. 0.2/0.8; (ii) omitted variable/interaction: $\mu=4+\beta_1T+\gamma Z$; compare models with vs. without $Z$.
+
+# 10. Discussion
+
+> **Write here**: Summarize patterns across $\pi$, families, and designs; practical recommendations (HC3, GLMs, robust methods).
+
+# 11. Reproducibility
+
+> **Write here**: Note seeds, software versions, and how to re-run.
+
+```{r setup}
+#| label: setup
+#| include: false
+# TODO: global options, seeds, and knitr defaults (edit to your needs)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 6.5, fig.height = 4.2)
+set.seed(20251105)
+```
+
+```{r libraries}
+#| label: libraries
+library(mvtnorm)
+library(sandwich)
+library(lmtest)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(MASS)    # for rlm (robust) and utilities
+library(broom)   # tidy model outputs
+library(extraDistr) # for rlaplace()
+
+```
+
+```{r helpers}
+#| label: helpers
+# ---- Sigma builders ----
+make_sigma_identity <- function(d) diag(d)
+make_sigma_ar1 <- function(d, rho) {
+  mat <- matrix(0, d, d)
+  for (i in 1:d) for (j in 1:d) mat[i,j] <- rho^abs(i-j)
+  mat
+}
+make_sigma_equicorr <- function(d, rho) {
+  mat <- matrix(rho, d, d); diag(mat) <- 1; mat
+}
+
+# ---- Laplace sampler (if you don't use extraDistr::rlaplace) ----
+rlaplace_custom <- function(n, mu=0, b=1) {
+  u <- runif(n, -0.5, 0.5)
+  mu - b * sign(u) * log(1 - 2*abs(u))
+}
+
+# ---- Parameterization helpers to keep mean = mu ----
+r_alt <- function(family, mu, params = list()) {
+  n <- length(mu)
+  fam <- tolower(family)
+  if (fam == "poisson") {
+    # Poisson(mean = mu)
+    return(rpois(n, lambda = pmax(mu, 1e-8)))
+  } else if (fam == "nb" || fam == "negbin") {
+    # NB2: Var = mu + kappa*mu^2  -> size = 1/kappa, prob = size/(size+mu)
+    kappa <- params$kappa %||% 0.5
+    size  <- 1 / kappa
+    prob  <- size / (size + mu)
+    return(rnbinom(n, size = size, prob = prob))
+  } else if (fam == "gamma") {
+    # Var = phi * mu^2, shape=1/phi, scale=phi*mu
+    phi   <- params$phi %||% 1
+    shape <- 1 / phi
+    scale <- phi * mu
+    return(rgamma(n, shape = shape, scale = scale))
+  } else if (fam == "lognormal") {
+    # CV given => s^2 = log(1+CV^2), m = log(mu) - s^2/2
+    CV <- params$CV %||% 1
+    s2 <- log(1 + CV^2); s <- sqrt(s2); m <- log(mu) - s2/2
+    return(rlnorm(n, meanlog = m, sdlog = s))
+  } else if (fam == "laplace") {
+    # Var = 2b^2. If want Var=1, set b=1/sqrt(2)
+    b <- params$b %||% (1/sqrt(2))
+    if (requireNamespace("extraDistr", quietly = TRUE)) {
+      return(extraDistr::rlaplace(n, mu, b))
+    } else {
+      return(rlaplace_custom(n, mu, b))
+    }
+  } else if (fam == "t") {
+    # Shift+scale t_nu to mean=mu, Var≈1: scale = sqrt((nu-2)/nu)
+    nu <- params$nu %||% 3
+    sc <- sqrt((nu - 2) / nu)
+    return(mu + sc * rt(n, df = nu))
+  } else if (fam == "uniform") {
+    # Var = a^2/3; choose a from params
+    a <- params$a %||% 1
+    return(runif(n, min = mu - a, max = mu + a))
+  } else if (fam == "zip") {
+    # Zero-inflated Poisson: choose pi0 then lambda = mu/(1-pi0)
+    pi0 <- params$pi0 %||% 0.3
+    lambda <- mu / pmax(1 - pi0, 1e-8)
+    is_zero <- runif(n) < pi0
+    draw <- rpois(n, lambda)
+    draw[is_zero] <- 0
+    return(draw)
+  } else {
+    stop("Unknown family: ", family)
+  }
+}
+
+`%||%` <- function(a,b) if (is.null(a)) b else a
+
+# ---- Robust SE helper (HC3) ----
+se_hc3 <- function(fit) sqrt(diag(sandwich::vcovHC(fit, type = "HC3")))
+
+# ---- Freedman–Lane permutation p-value for beta1 ----
+# Works for continuous designs; tests the first coefficient after intercept
+freedman_lane_p <- function(y, X, nperm = 999) {
+  # Full model: y ~ X (all columns)
+  fit_full <- lm(y ~ X)
+  # Reduced model: drop X1 (test target)
+  X_reduced <- as.matrix(X[ , -1, drop = FALSE])
+  fit_red   <- if (ncol(X_reduced) > 0) lm(y ~ X_reduced) else lm(y ~ 1)
+  # Residuals under reduced model
+  e <- resid(fit_red)
+  # Fitted under reduced
+  yhat_red <- fitted(fit_red)
+
+  # observed t for beta1 (in full model)
+  t_obs <- coef(summary(fit_full))["XX1","t value"] %||% {
+    # ensure column names exist
+    colnames(X) <- paste0("XX", seq_len(ncol(X)))
+    fit_full <- lm(y ~ X)
+    coef(summary(fit_full))["XX1","t value"]
+  }
+
+  # permute residuals, rebuild y*, refit full, collect |t|
+  t_perm <- replicate(nperm, {
+    e_perm <- sample(e, replace = FALSE)
+    y_star <- yhat_red + e_perm
+    fit_star <- lm(y_star ~ X)
+    tt <- coef(summary(fit_star))["XX1","t value"]
+    abs(tt)
+  })
+  pval <- (sum(abs(t_obs) <= t_perm) + 1) / (nperm + 1)
+  pval
+}
+
+```
+
+```{r simulate-once}
+#| label: simulate-once
+simulate_once <- function(dist = "poisson",
+                          pi = 0.5,
+                          n = 300,
+                          d = 5,
+                          Sigma_type = c("I","AR1","EQ"),
+                          rho = 0.3,
+                          m = NULL,           # mean of X
+                          beta0 = 4,
+                          beta = c(1, 1, rep(0, max(0, d-2))),
+                          family_params = list(),
+                          do_perm = TRUE,
+                          nperm = 199) {
+
+  Sigma_type <- match.arg(Sigma_type)
+  if (is.null(m)) m <- rep(0, d)
+
+  Sigma <- switch(Sigma_type,
+                  I   = make_sigma_identity(d),
+                  AR1 = make_sigma_ar1(d, rho),
+                  EQ  = make_sigma_equicorr(d, rho))
+
+  X <- mvtnorm::rmvnorm(n, mean = m, sigma = Sigma)
+  colnames(X) <- paste0("X", seq_len(d))
+
+  mu <- as.numeric(beta0 + X %*% beta)
+
+  Z <- rbinom(n, size = 1, prob = pi)
+  Y <- numeric(n)
+  # component 1: Normal(mean=mu, sd=1)
+  Y[Z == 1] <- rnorm(sum(Z == 1), mean = mu[Z == 1], sd = 1)
+  # component 0: Alt family(mean=mu)
+  Y[Z == 0] <- r_alt(dist, mu = mu[Z == 0], params = family_params)
+
+  dat <- data.frame(Y, X)
+
+  # OLS
+  fit <- lm(Y ~ ., data = dat)
+  smry <- summary(fit)
+  # classical
+  beta1_hat <- coef(fit)["X1"]
+  se_class  <- smry$coefficients["X1","Std. Error"]
+  t_class   <- smry$coefficients["X1","t value"]
+  p_class   <- smry$coefficients["X1","Pr(>|t|)"]
+  # HC3
+  se_rbst   <- se_hc3(fit)
+  se_hc3_1  <- se_rbst[names(se_rbst) == "X1"]
+  t_hc3     <- beta1_hat / se_hc3_1
+  df_wald   <- n - (d + 1)
+  p_hc3     <- 2 * pt(abs(t_hc3), df = df_wald, lower.tail = FALSE)
+
+  # Permutation (Freedman–Lane) for beta1
+  p_perm <- if (do_perm) freedman_lane_p(dat$Y, as.matrix(dat[ , grep("^X", names(dat))]), nperm) else NA_real_
+
+  # Diagnostics
+  rstud <- rstudent(fit)
+  prop_rstud_gt3 <- mean(abs(rstud) > 3)
+  cooks <- cooks.distance(fit)
+  cooks_q <- as.numeric(quantile(cooks, probs = c(.5,.9,.95,.99)))
+
+  list(beta1_hat = beta1_hat,
+       se_class = se_class,
+       se_hc3 = se_hc3_1,
+       p_class = p_class,
+       p_hc3 = p_hc3,
+       p_perm = p_perm,
+       prop_rstud_gt3 = prop_rstud_gt3,
+       cooks_q = cooks_q)
+}
+
+```
+
+```{r monte-carlo}
+#| label: monte-carlo
+compute_metrics <- function(res_list, beta1_true, alpha = 0.05) {
+  tab <- tibble::tibble(
+    beta1_hat = map_dbl(res_list, "beta1_hat"),
+    se_class  = map_dbl(res_list, "se_class"),
+    se_hc3    = map_dbl(res_list, "se_hc3"),
+    p_class   = map_dbl(res_list, "p_class"),
+    p_hc3     = map_dbl(res_list, "p_hc3"),
+    p_perm    = map_dbl(res_list, "p_perm"),
+    prop_rstud_gt3 = map_dbl(res_list, "prop_rstud_gt3")
+  )
+
+  ci_lo_class <- tab$beta1_hat - qt(.975, df = Inf) * tab$se_class
+  ci_hi_class <- tab$beta1_hat + qt(.975, df = Inf) * tab$se_class
+  ci_lo_hc3   <- tab$beta1_hat - qt(.975, df = Inf) * tab$se_hc3
+  ci_hi_hc3   <- tab$beta1_hat + qt(.975, df = Inf) * tab$se_hc3
+
+  tibble::tibble(
+    bias     = mean(tab$beta1_hat - beta1_true),
+    var      = var(tab$beta1_hat),
+    mse      = mean((tab$beta1_hat - beta1_true)^2),
+    cover_class = mean(beta1_true >= ci_lo_class & beta1_true <= ci_hi_class),
+    cover_hc3   = mean(beta1_true >= ci_lo_hc3   & beta1_true <= ci_hi_hc3),
+    type1_class = mean(tab$p_class < alpha, na.rm = TRUE),  # interpret as type I if beta1_true==0
+    type1_hc3   = mean(tab$p_hc3   < alpha, na.rm = TRUE),
+    type1_perm  = mean(tab$p_perm  < alpha, na.rm = TRUE),
+    power_class = mean(tab$p_class < alpha, na.rm = TRUE),  # interpret as power if beta1_true>0
+    power_hc3   = mean(tab$p_hc3   < alpha, na.rm = TRUE),
+    power_perm  = mean(tab$p_perm  < alpha, na.rm = TRUE),
+    avg_prop_rstud_gt3 = mean(tab$prop_rstud_gt3)
+  )
+}
+
+run_monte_carlo <- function(dist = "poisson",
+                            pis  = c(0, .25, .5, .75, 1),
+                            n    = 300,
+                            d    = 5,
+                            Sigma_type = "AR1",
+                            rho  = 0.3,
+                            R    = 500,
+                            beta0 = 4,
+                            beta  = c(1,1,rep(0, max(0, d-2))),
+                            family_params = list(),
+                            do_perm = TRUE,
+                            seed = 1) {
+  set.seed(seed)
+  out <- purrr::map_dfr(pis, function(pi) {
+    res <- replicate(R, simulate_once(dist = dist, pi = pi, n = n, d = d,
+                                      Sigma_type = Sigma_type, rho = rho,
+                                      beta0 = beta0, beta = beta,
+                                      family_params = family_params,
+                                      do_perm = do_perm),
+                     simplify = FALSE)
+    met <- compute_metrics(res, beta1_true = beta[1])
+    tibble::tibble(pi = pi, dist = dist, n = n, d = d, Sigma_type = Sigma_type,
+                   rho = rho) %>% bind_cols(met)
+  })
+  out
+}
+
+```
+
+```{r figures}
+#| label: figures
+# Example: primary Poisson track over pi
+res_pois <- run_monte_carlo(
+  dist = "poisson",
+  pis  = c(0, .25, .5, .75, 1),
+  n = 300, d = 5, Sigma_type = "AR1", rho = 0.3,
+  R = 300,  # increase later
+  beta0 = 4, beta = c(1,1,0,0,0),
+  seed = 2025
+)
+
+# Power vs pi (HC3 and classical)
+power_long <- res_pois %>%
+  select(pi, starts_with("power_")) %>%
+  pivot_longer(-pi, names_to = "method", values_to = "power") %>%
+  mutate(method = recode(method,
+                         power_class = "Classical t",
+                         power_hc3   = "HC3 t",
+                         power_perm  = "Permutation (FL)"))
+
+ggplot(power_long, aes(pi, power, color = method)) +
+  geom_line(size = 1) + geom_point() +
+  scale_y_continuous(limits = c(0,1)) +
+  labs(title = "Power vs π (Poisson mixture)",
+       x = expression(pi), y = "Power", color = "Test") +
+  theme_minimal(base_size = 12)
+
+# Coverage vs pi
+cov_long <- res_pois %>%
+  select(pi, cover_class, cover_hc3) %>%
+  pivot_longer(-pi, names_to = "method", values_to = "cover") %>%
+  mutate(method = recode(method,
+                         cover_class = "Classical CI",
+                         cover_hc3   = "HC3 CI"))
+
+ggplot(cov_long, aes(pi, cover, color = method)) +
+  geom_line(size = 1) + geom_point() +
+  coord_cartesian(ylim = c(0,1)) +
+  labs(title = "95% CI Coverage vs π", x = expression(pi), y = "Coverage") +
+  theme_minimal(base_size = 12)
+
+# RMSE vs pi
+ggplot(res_pois, aes(pi, mse)) +
+  geom_line(size = 1) + geom_point() +
+  labs(title = "MSE of betâ1 vs π", x = expression(pi), y = "MSE") +
+  theme_minimal(base_size = 12)
+
+```
+
+```{r tables}
+#| label: tables
+res_pois %>%
+  select(pi, bias, var, mse,
+         cover_class, cover_hc3,
+         power_class, power_hc3, power_perm,
+         avg_prop_rstud_gt3) %>%
+  arrange(pi)
+
+```
+
+```{r session-info}
+#| label: multi-families
+# Run the same MC grid for multiple nonnormal families
+families <- list(
+  list(dist = "nb",        params = list(kappa = 0.5)),
+  list(dist = "gamma",     params = list(phi   = 1)),
+  list(dist = "lognormal", params = list(CV    = 1)),
+  list(dist = "laplace",   params = list(b     = 1/sqrt(2))),
+  list(dist = "t",         params = list(nu    = 3)),
+  list(dist = "uniform",   params = list(a     = 1)),
+  list(dist = "zip",       params = list(pi0   = 0.3))
+)
+
+run_one_family <- function(f) {
+  run_monte_carlo(
+    dist  = f$dist,
+    pis   = c(0, .25, .5, .75, 1),
+    n     = 300, d = 5,
+    Sigma_type = "AR1", rho = 0.3,
+    R     = 300,                 # increase to 2000 for final
+    beta0 = 4, beta = c(1,1,0,0,0),
+    family_params = f$params,
+    seed  = 2025
+  )
+}
+
+res_multi <- purrr::map_dfr(families, run_one_family)
+
+# --- Power vs pi (facet by family) ---
+power_long_all <- res_multi %>%
+  select(dist, pi, starts_with("power_")) %>%
+  tidyr::pivot_longer(-c(dist, pi), names_to = "method", values_to = "power") %>%
+  mutate(method = recode(method,
+                         power_class = "Classical t",
+                         power_hc3   = "HC3 t",
+                         power_perm  = "Permutation (FL)"),
+         dist = toupper(dist))
+
+ggplot(power_long_all, aes(pi, power, color = method)) +
+  geom_line(size = 0.9) + geom_point(size = 1.6) +
+  scale_y_continuous(limits = c(0,1)) +
+  labs(title = "Power vs π across nonnormal families",
+       x = expression(pi), y = "Power", color = "Test") +
+  facet_wrap(~ dist, ncol = 3) +
+  theme_minimal(base_size = 12)
+
+# --- Coverage vs pi (facet) ---
+cov_long_all <- res_multi %>%
+  select(dist, pi, cover_class, cover_hc3) %>%
+  tidyr::pivot_longer(-c(dist, pi), names_to = "method", values_to = "cover") %>%
+  mutate(method = recode(method,
+                         cover_class = "Classical CI",
+                         cover_hc3   = "HC3 CI"),
+         dist = toupper(dist))
+
+ggplot(cov_long_all, aes(pi, cover, color = method)) +
+  geom_line(size = 0.9) + geom_point(size = 1.6) +
+  coord_cartesian(ylim = c(0,1)) +
+  labs(title = "95% CI Coverage vs π across nonnormal families",
+       x = expression(pi), y = "Coverage", color = "CI") +
+  facet_wrap(~ dist, ncol = 3) +
+  theme_minimal(base_size = 12)
+
+# --- MSE vs pi (facet) ---
+ggplot(res_multi, aes(pi, mse)) +
+  geom_line(size = 0.9) + geom_point(size = 1.6) +
+  labs(title = "MSE of β̂₁ vs π across families",
+       x = expression(pi), y = "MSE") +
+  facet_wrap(~ toupper(dist), ncol = 3) +
+  theme_minimal(base_size = 12)
+```
+
+
+```{r}
+## Abstract
+<!-- 3–5 sentences: What varies (π and nonnormal family), what we measure (bias/var/MSE, type I error, power, coverage), and expected patterns (heteroskedastic families lower coverage/power; HC3 and GLMs help). -->
+
+## 1. Model (Baseline)
+<!-- Define Y = β0 + Xᵀβ + ε, X ~ N_d(m, Σ). Emphasize both mixture components share mean μ = β0 + Xᵀβ. -->
+
+## 2. Research Questions (fixed)
+<!-- List the three questions exactly as in your spec. -->
+
+## 3. Model Variants and Inference Targets
+<!-- Families: Poisson → NB → Gamma → Lognormal → Laplace → t → Uniform → ZIP. Tests: classical t, HC3, permutation (Freedman–Lane vs label shuffle). Optional: robust regression, transforms, diagnostics. -->
+
+## Discussion
+<!-- Summarize: as π↓, Poisson/NB/Gamma/Lognormal show stronger heteroskedasticity → classical SE underestimation → coverage↓, power↓; HC3 better; GLMs best for positive-valued data. For Laplace/t: heavy tails → small-sample losses; Uniform may raise power via smaller variance. Design (d, ρ) inflates Var(β̂). Practical advice. -->
+
+## Reproducibility
+<!-- Record seeds, package versions; include sessionInfo() output in an appendix. -->
+
+```
+
+```{r}
+#| label: sanity-checks
+# Small R sanity checks
+quick_check <- function(beta1 = 1, R = 100, dist = "poisson",
+                        family_params = list(), seed = 999) {
+  out <- run_monte_carlo(
+    dist = dist,
+    pis  = c(0, .5, 1),
+    n = 200, d = 5, Sigma_type = "AR1", rho = 0.3,
+    R = R,
+    beta0 = 4,
+    beta  = c(beta1, 1, 0, 0, 0),
+    family_params = family_params,
+    seed = seed
+  )
+  out %>%
+    transmute(
+      dist, pi,
+      bias, var, mse,
+      cover_class, cover_hc3,
+      type1_class = if (beta1 == 0) power_class else NA_real_,
+      type1_hc3   = if (beta1 == 0) power_hc3   else NA_real_,
+      power_class = if (beta1 != 0) power_class else NA_real_,
+      power_hc3   = if (beta1 != 0) power_hc3   else NA_real_
+    )
+}
+
+# (A) β1 = 0 → interpret power_* as type I error
+chk_type1 <- quick_check(beta1 = 0, R = 100, dist = "poisson")
+chk_type1
+
+# (B) β1 = 1 → interpret power_* as power
+chk_power <- quick_check(beta1 = 1, R = 100, dist = "poisson")
+chk_power
+
+# Quick messages (rules of thumb, not hard tests)
+msg_cov <- function(cover, name) {
+  paste0(name, ": mean(coverage) = ", sprintf("%.3f", mean(cover)),
+         " (target ≈ 0.95 under ideal assumptions; HC3 usually closer)")
+}
+
+cat(msg_cov(chk_type1$cover_class, "Classical CI (β1=0)"), "\n")
+cat(msg_cov(chk_type1$cover_hc3,   "HC3 CI (β1=0)"), "\n")
+
+```
+
+```{r}
+#| label: sanity-hint
+avg_dev_class <- mean(abs(chk_type1$cover_class - 0.95))
+avg_dev_hc3   <- mean(abs(chk_type1$cover_hc3   - 0.95))
+data.frame(avg_dev_class, avg_dev_hc3)
+
+```
+
+```{r}
+
+```
