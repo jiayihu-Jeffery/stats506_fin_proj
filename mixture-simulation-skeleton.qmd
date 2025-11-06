@@ -123,12 +123,15 @@ library(mvtnorm)
 library(sandwich)
 library(lmtest)
 library(ggplot2)
-library(dplyr)
+library(MASS)    # load MASS first so it does NOT mask dplyr::select
+library(dplyr)   # load dplyr after MASS
 library(tidyr)
 library(purrr)
-library(MASS)    # for rlm (robust) and utilities
-library(broom)   # tidy model outputs
-library(extraDistr) # for rlaplace()
+library(broom)
+library(extraDistr) # for rlaplace()library(mvtnorm)
+library(sandwich)
+library(lmtest)
+library(ggplot2)
 
 ```
 
