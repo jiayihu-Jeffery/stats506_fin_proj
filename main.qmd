@@ -1,0 +1,1405 @@
+---
+title: "OLS Estimation and Power under Normal–Nonnormal Mixture Responses"
+author: "Jiayi Hu"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+execute:
+  warning: false
+  message: false
+
+params:
+  seed:
+    value: 123
+  n:
+    value: 300
+  R:
+    value: 500
+  B:
+    value: 199
+  alpha:
+    value: 0.05
+  pi_vals:
+    value: [0, 0.25, 0.5, 0.75, 1]
+  d:
+    value: 5
+  beta0:
+    value: 4
+  beta1_alt:
+    value: 0.5
+  Sigma_identity:
+    value: true
+  phi_gamma:
+    value: 5
+  df_t:
+    value: 3
+  scale_t:
+    value: 1
+---
+
+
+```{r setup}
+pkgs <- c("ggplot2", "dplyr", "tidyr", "purrr", "knitr")
+to_install <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+set.seed(params$seed)
+
+
+n       <- as.integer(params$n)
+R       <- as.integer(params$R)
+B       <- as.integer(params$B)
+alpha   <- as.numeric(params$alpha)
+
+pi_vals <- as.numeric(unlist(params$pi_vals))
+
+d       <- as.integer(params$d)
+beta0   <- as.numeric(params$beta0)
+beta1_alt <- as.numeric(params$beta1_alt)
+
+Sigma <- diag(d)
+if (!isTRUE(params$Sigma_identity)) {
+  Sigma <- diag(d)
+}
+
+phi_gamma <- as.numeric(params$phi_gamma)
+df_t      <- as.numeric(params$df_t)
+scale_t   <- as.numeric(params$scale_t)
+
+beta_null <- c(0, rep(0, d - 1))
+beta_alt  <- c(beta1_alt, rep(0, d - 1))
+```
+
+---
+
+# 3. ：、OLS、HC3、
+
+## 3.1  \(X \sim N(0,\Sigma)\)
+
+```{r funcs-x}
+make_X <- function(n, Sigma) {
+  d <- ncol(Sigma)
+  Z <- matrix(rnorm(n * d), nrow = n, ncol = d)
+  Z %*% chol(Sigma)
+}
+```
+
+## 3.2  \(Y|X\)
+
+- ：\(N(\mu,1)\)
+- （ \(\mu\)）：
+  - Poisson(\(\mu\))（ pmax  \(\mu>0\)）
+  - Gamma(mean=\(\mu\), shape=\(\phi\))（scale=\(\mu/\phi\)）
+  - Student-t：\(\mu + s\cdot t_\nu\)（`scale_t`  \(s\)）
+
+```{r funcs-y}
+generate_y_mixture <- function(mu, pi, alt = c("poisson", "gamma", "t"),
+                               phi_gamma = 5, df_t = 3, scale_t = 1) {
+  alt <- match.arg(alt)
+  n <- length(mu)
+
+  Z <- rbinom(n, size = 1, prob = pi)
+
+  y <- numeric(n)
+
+  idx_norm <- which(Z == 1)
+  if (length(idx_norm) > 0) {
+    y[idx_norm] <- rnorm(length(idx_norm), mean = mu[idx_norm], sd = 1)
+  }
+
+  idx_alt <- which(Z == 0)
+  if (length(idx_alt) > 0) {
+    mu_alt <- mu[idx_alt]
+
+    if (alt %in% c("poisson", "gamma")) {
+      mu_alt <- pmax(mu_alt, 1e-8)
+    }
+
+    if (alt == "poisson") {
+      y[idx_alt] <- rpois(length(idx_alt), lambda = mu_alt)
+
+    } else if (alt == "gamma") {
+      y[idx_alt] <- rgamma(length(idx_alt), shape = phi_gamma, scale = mu_alt / phi_gamma)
+
+    } else if (alt == "t") {
+      y[idx_alt] <- mu_alt + scale_t * rt(length(idx_alt), df = df_t)
+    }
+  }
+
+  y
+}
+```
+
+## 3.3 OLS ：SE、HC3 SE、、CI（）
+
+```{r funcs-ols}
+ols_stats <- function(X, y, alpha = 0.05) {
+  n <- nrow(X)
+  d <- ncol(X)
+
+  Xfull <- cbind(1, X)
+  p <- ncol(Xfull)
+  df_res <- n - p
+
+  XtX_inv <- solve(crossprod(Xfull))
+  bhat <- as.numeric(XtX_inv %*% crossprod(Xfull, y))
+
+  yhat <- as.numeric(Xfull %*% bhat)
+  e <- y - yhat
+  RSS <- sum(e^2)
+  sigma2 <- RSS / df_res
+
+  V_classic <- sigma2 * XtX_inv
+  se_classic <- sqrt(diag(V_classic))
+
+  h <- rowSums((Xfull %*% XtX_inv) * Xfull)
+
+  w <- (e / (1 - h))^2
+  meat <- crossprod(Xfull, Xfull * w)
+  V_HC3 <- XtX_inv %*% meat %*% XtX_inv
+  se_HC3 <- sqrt(diag(V_HC3))
+
+  beta1_hat <- bhat[2]
+
+  t_classic <- beta1_hat / se_classic[2]
+  p_classic <- 2 * pt(abs(t_classic), df = df_res, lower.tail = FALSE)
+
+  t_HC3 <- beta1_hat / se_HC3[2]
+  p_HC3 <- 2 * pt(abs(t_HC3), df = df_res, lower.tail = FALSE)
+
+  crit <- qt(1 - alpha/2, df = df_res)
+  ci_classic <- beta1_hat + c(-1, 1) * crit * se_classic[2]
+  ci_HC3     <- beta1_hat + c(-1, 1) * crit * se_HC3[2]
+
+  s_i2 <- (RSS - (e^2) / (1 - h)) / (df_res - 1)
+  rstud <- e / sqrt(s_i2 * (1 - h))
+  outlier_frac <- mean(abs(rstud) > 3)
+
+  list(
+    beta1_hat = beta1_hat,
+    p_classic = p_classic,
+    p_HC3 = p_HC3,
+    ci_classic = ci_classic,
+    ci_HC3 = ci_HC3,
+    outlier_frac = outlier_frac
+  )
+}
+```
+
+## 3.4 （Freedman–Lane：shuffled residuals）
+
+```{r funcs-perm}
+perm_test_resid <- function(X, y, B = 199) {
+  n <- nrow(X)
+
+  Xfull <- cbind(1, X)
+  p <- ncol(Xfull)
+  df_res <- n - p
+  XtX_inv <- solve(crossprod(Xfull))
+
+  bhat <- as.numeric(XtX_inv %*% crossprod(Xfull, y))
+  e <- y - as.numeric(Xfull %*% bhat)
+  RSS <- sum(e^2)
+  sigma2 <- RSS / df_res
+  se_classic <- sqrt(diag(sigma2 * XtX_inv))
+  t_obs <- bhat[2] / se_classic[2]
+
+  Xred <- cbind(1, X[, -1, drop = FALSE])
+  XtXr_inv <- solve(crossprod(Xred))
+  b_red <- as.numeric(XtXr_inv %*% crossprod(Xred, y))
+  yhat_red <- as.numeric(Xred %*% b_red)
+  e_red <- y - yhat_red
+
+  t_perm <- numeric(B)
+  for (b in 1:B) {
+    y_perm <- yhat_red + sample(e_red, replace = FALSE)
+
+    bhat_b <- as.numeric(XtX_inv %*% crossprod(Xfull, y_perm))
+    e_b <- y_perm - as.numeric(Xfull %*% bhat_b)
+    RSS_b <- sum(e_b^2)
+    sigma2_b <- RSS_b / df_res
+    se_b <- sqrt(diag(sigma2_b * XtX_inv))
+
+    t_perm[b] <- bhat_b[2] / se_b[2]
+  }
+
+  (1 + sum(abs(t_perm) >= abs(t_obs))) / (B + 1)
+}
+```
+
+---
+
+# 4. （H0 / H1）
+
+```{r sim-runner}
+simulate_condition <- function(n, R, pi, alt, beta0, beta_vec, Sigma,
+                               phi_gamma, df_t, scale_t,
+                               B, alpha) {
+  beta1_true <- beta_vec[1]
+
+  out <- vector("list", R)
+  for (r in 1:R) {
+    X <- make_X(n, Sigma)
+    mu <- as.numeric(beta0 + X %*% beta_vec)
+
+    y <- generate_y_mixture(
+      mu, pi = pi, alt = alt,
+      phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t
+    )
+
+    fit <- ols_stats(X, y, alpha = alpha)
+
+    p_perm <- perm_test_resid(X, y, B = B)
+
+    out[[r]] <- data.frame(
+      beta1_hat = fit$beta1_hat,
+      p_classic = fit$p_classic,
+      p_HC3 = fit$p_HC3,
+      p_perm = p_perm,
+      cover_classic = (fit$ci_classic[1] <= beta1_true && beta1_true <= fit$ci_classic[2]),
+      cover_HC3     = (fit$ci_HC3[1]     <= beta1_true && beta1_true <= fit$ci_HC3[2]),
+      outlier_frac  = fit$outlier_frac
+    )
+  }
+
+  dplyr::bind_rows(out)
+}
+```
+
+---
+
+# 5. ： Alt  ×  π
+
+```{r main-sim}
+alts <- c("poisson", "gamma", "t")
+summary_rows <- list()
+
+for (alt in alts) {
+  for (pi in pi_vals) {
+
+    sim_H0 <- simulate_condition(
+      n = n, R = R, pi = pi, alt = alt,
+      beta0 = beta0, beta_vec = beta_null,
+      Sigma = Sigma,
+      phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t,
+      B = B, alpha = alpha
+    )
+
+    sim_H1 <- simulate_condition(
+      n = n, R = R, pi = pi, alt = alt,
+      beta0 = beta0, beta_vec = beta_alt,
+      Sigma = Sigma,
+      phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t,
+      B = B, alpha = alpha
+    )
+
+    beta1_true <- beta_alt[1]
+    bias <- mean(sim_H1$beta1_hat - beta1_true)
+    varb <- var(sim_H1$beta1_hat)
+    mse  <- mean((sim_H1$beta1_hat - beta1_true)^2)
+    rmse <- sqrt(mse)
+
+    typeI_classic <- mean(sim_H0$p_classic < alpha)
+    typeI_HC3     <- mean(sim_H0$p_HC3 < alpha)
+    typeI_perm    <- mean(sim_H0$p_perm < alpha)
+
+    power_classic <- mean(sim_H1$p_classic < alpha)
+    power_HC3     <- mean(sim_H1$p_HC3 < alpha)
+    power_perm    <- mean(sim_H1$p_perm < alpha)
+
+    coverage_classic <- mean(sim_H1$cover_classic)
+    coverage_HC3     <- mean(sim_H1$cover_HC3)
+
+    outlier_frac <- mean(sim_H1$outlier_frac)
+
+    summary_rows[[length(summary_rows) + 1]] <- data.frame(
+      distribution = alt,
+      pi = pi,
+      bias = bias,
+      variance = varb,
+      MSE = mse,
+      RMSE = rmse,
+      typeI_classic = typeI_classic,
+      typeI_HC3 = typeI_HC3,
+      typeI_perm = typeI_perm,
+      power_classic = power_classic,
+      power_HC3 = power_HC3,
+      power_perm = power_perm,
+      coverage_classic = coverage_classic,
+      coverage_HC3 = coverage_HC3,
+      outlier_frac = outlier_frac
+    )
+  }
+}
+
+results <- dplyr::bind_rows(summary_rows) |>
+  dplyr::mutate(
+    distribution = factor(distribution,
+                          levels = c("poisson", "gamma", "t"),
+                          labels = c("Poisson", "Gamma", "Student-t"))
+  )
+
+results
+```
+
+---
+
+# 6. （Deliverable：bias & MSE）
+
+```{r table-bias-mse}
+tab_bias_mse <- results |>
+  dplyr::select(distribution, pi, bias, MSE, RMSE) |>
+  dplyr::arrange(distribution, pi)
+
+knitr::kable(
+  tab_bias_mse,
+  digits = 4,
+  caption = "Summary Table: Bias, MSE, RMSE of beta1_hat (under H1) by distribution and pi"
+)
+```
+
+---
+
+# 7. ：Power–π（3）
+
+```{r fig-power}
+power_long <- results |>
+  dplyr::select(distribution, pi, power_classic, power_HC3, power_perm) |>
+  tidyr::pivot_longer(
+    cols = c(power_classic, power_HC3, power_perm),
+    names_to = "method",
+    values_to = "power"
+  ) |>
+  dplyr::mutate(
+    method = factor(method,
+                    levels = c("power_classic", "power_HC3", "power_perm"),
+                    labels = c("Classic t", "HC3 robust t", "Permutation (resid shuffle)"))
+  )
+
+ggplot(power_long, aes(x = pi, y = power, color = method)) +
+  geom_line() +
+  geom_point(size = 2) +
+  facet_wrap(~ distribution) +
+  labs(title = "Power vs pi (under H1)",
+       x = "Normal component proportion pi",
+       y = "Power",
+       color = "Method") +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+---
+
+# 8. ：Coverage–π（Classic CI vs HC3 CI）
+
+```{r fig-coverage}
+cov_long <- results |>
+  dplyr::select(distribution, pi, coverage_classic, coverage_HC3) |>
+  tidyr::pivot_longer(
+    cols = c(coverage_classic, coverage_HC3),
+    names_to = "method",
+    values_to = "coverage"
+  ) |>
+  dplyr::mutate(
+    method = factor(method,
+                    levels = c("coverage_classic", "coverage_HC3"),
+                    labels = c("Classic CI", "HC3-based CI"))
+  )
+
+ggplot(cov_long, aes(x = pi, y = coverage, color = method)) +
+  geom_line() +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0.95, linetype = "dashed") +
+  facet_wrap(~ distribution) +
+  labs(title = "95% CI Coverage vs pi (under H1)",
+       x = "Normal component proportion pi",
+       y = "Coverage",
+       color = "CI type") +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+---
+
+# 9. ：RMSE–π
+
+```{r fig-rmse}
+ggplot(results, aes(x = pi, y = RMSE)) +
+  geom_line() +
+  geom_point(size = 2) +
+  facet_wrap(~ distribution) +
+  labs(title = "RMSE of beta1_hat vs pi (under H1)",
+       x = "Normal component proportion pi",
+       y = "RMSE") +
+  theme_minimal()
+```
+
+---
+
+# 10. ： |r|>3 –π
+
+```{r fig-outliers}
+ggplot(results, aes(x = pi, y = outlier_frac)) +
+  geom_line() +
+  geom_point(size = 2) +
+  facet_wrap(~ distribution) +
+  labs(title = "Proportion of studentized residuals |r| > 3 vs pi (under H1)",
+       x = "Normal component proportion pi",
+       y = "Proportion |r| > 3") +
+  theme_minimal()
+```
+
+---
+
+# 11. ：Type I error–π（）
+
+```{r fig-type1}
+type1_long <- results |>
+  dplyr::select(distribution, pi, typeI_classic, typeI_HC3, typeI_perm) |>
+  tidyr::pivot_longer(
+    cols = c(typeI_classic, typeI_HC3, typeI_perm),
+    names_to = "method",
+    values_to = "type1"
+  ) |>
+  dplyr::mutate(
+    method = factor(method,
+                    levels = c("typeI_classic", "typeI_HC3", "typeI_perm"),
+                    labels = c("Classic t", "HC3 robust t", "Permutation (resid shuffle)"))
+  )
+
+ggplot(type1_long, aes(x = pi, y = type1, color = method)) +
+  geom_line() +
+  geom_point(size = 2) +
+  geom_hline(yintercept = alpha, linetype = "dashed") +
+  facet_wrap(~ distribution) +
+  labs(title = "Type I Error vs pi (under H0)",
+       x = "Normal component proportion pi",
+       y = "Type I Error",
+       color = "Method") +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+---
+
+# 12. （）
+
+```{r save-results, eval=FALSE}
+write.csv(results, "simulation_summary.csv", row.names = FALSE)
+saveRDS(results, "simulation_summary.rds")
+```
+
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+stopifnot(file.exists("simulation_summary.csv"))
+res <- read.csv("simulation_summary.csv")
+
+
+res <- res %>%
+mutate(
+pi = as.numeric(pi),
+distribution = factor(distribution, levels = c("Poisson", "Gamma", "Student-t"))
+)
+
+
+
+p_rmse <- ggplot(res, aes(x = pi, y = RMSE, color = distribution)) +
+geom_line() +
+geom_point(size = 2) +
+labs(
+title = "RMSE of OLS slope estimator vs mixture proportion",
+x = "Normal component proportion (pi)",
+y = "RMSE of beta1_hat",
+color = "Alt distribution"
+) +
+theme_minimal()
+
+p_rmse
+
+
+ggsave("fig1_rmse_vs_pi.png", p_rmse, width = 6.5, height = 4.2, dpi = 300)
+
+
+
+cov_long <- res %>%
+select(distribution, pi, coverage_classic, coverage_HC3) %>%
+pivot_longer(
+cols = c(coverage_classic, coverage_HC3),
+names_to = "method",
+values_to = "coverage"
+) %>%
+mutate(
+method = factor(
+method,
+levels = c("coverage_classic", "coverage_HC3"),
+labels = c("Classic 95% CI", "HC3-based 95% CI")
+)
+)
+
+p_cov <- ggplot(cov_long, aes(x = pi, y = coverage, color = method)) +
+geom_line() +
+geom_point(size = 2) +
+geom_hline(yintercept = 0.95, linetype = "dashed") +
+facet_wrap(~ distribution) +
+labs(
+title = "95% CI coverage vs mixture proportion",
+x = "Normal component proportion (pi)",
+y = "Empirical coverage",
+color = "CI method"
+) +
+coord_cartesian(ylim = c(0.90, 1.00)) +
+theme_minimal()
+
+p_cov
+
+ggsave("fig2_coverage_vs_pi.png", p_cov, width = 6.5, height = 4.2, dpi = 300)
+
+```
+```{r}
+
+
+p_rmse2 <- ggplot(res, aes(x = pi, y = RMSE, color = distribution, shape = distribution)) +
+geom_line(linewidth = 0.9) +
+geom_point(size = 2.4) +
+scale_x_continuous(
+breaks = sort(unique(res$pi)),
+labels = scales::label_number(accuracy = 0.01, trim = TRUE)
+) +
+labs(
+title = "RMSE of OLS slope estimator",
+subtitle = "Mixture responses: Normal vs (Poisson / Gamma / Student-t)",
+x = "Normal component proportion (π)",
+y = expression(RMSE(hat(beta)[1])),
+color = "Alt distribution",
+shape = "Alt distribution"
+) +
+theme_bw(base_size = 11) +
+theme(
+legend.position = "bottom",
+plot.title = element_text(face = "bold"),
+panel.grid.minor = element_blank()
+)
+
+p_rmse2
+ggsave("fig1_rmse_vs_pi.png", p_rmse2, width = 6.5, height = 4.2, dpi = 300)
+
+
+
+R_sim <- 500
+
+cov_long2 <- res %>%
+select(distribution, pi, coverage_classic, coverage_HC3) %>%
+pivot_longer(
+cols = c(coverage_classic, coverage_HC3),
+names_to = "method",
+values_to = "coverage"
+) %>%
+mutate(
+method = factor(
+method,
+levels = c("coverage_classic", "coverage_HC3"),
+labels = c("Classic 95% CI", "HC3-based 95% CI")
+),
+se = sqrt(coverage * (1 - coverage) / R_sim),
+ymin = pmax(0, coverage - 1.96 * se),
+ymax = pmin(1, coverage + 1.96 * se)
+)
+
+p_cov2 <- ggplot(cov_long2, aes(x = pi, y = coverage, color = method, linetype = method)) +
+geom_hline(yintercept = 0.95, linetype = "dashed") +
+geom_errorbar(aes(ymin = ymin, ymax = ymax), width = 0.03, linewidth = 0.5, alpha = 0.8) +
+geom_line(linewidth = 0.9) +
+geom_point(size = 2.2) +
+facet_wrap(~ distribution) +
+scale_x_continuous(
+breaks = sort(unique(res$pi)),
+labels = scales::label_number(accuracy = 0.01, trim = TRUE)
+) +
+coord_cartesian(ylim = c(0.90, 1.00)) +
+labs(
+title = "Empirical 95% CI coverage vs mixture proportion",
+subtitle = "Error bars: Monte Carlo 95% intervals (R = 500)",
+x = "Normal component proportion (π)",
+y = "Empirical coverage",
+color = "CI method",
+linetype = "CI method"
+) +
+theme_bw(base_size = 11) +
+theme(
+legend.position = "bottom",
+plot.title = element_text(face = "bold"),
+panel.grid.minor = element_blank()
+)
+
+p_cov2
+ggsave("fig2_coverage_vs_pi.png", p_cov2, width = 6.8, height = 4.2, dpi = 300)
+
+```
+
+
+```{r}
+
+pkgs <- c("ggplot2", "dplyr", "tidyr", "scales")
+to_install <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+cat("Current working directory:\n", getwd(), "\n\n")
+if (!file.exists("simulation_summary.csv")) {
+  stop("Cannot find 'simulation_summary.csv' in the current working directory.\n",
+       "Solution: setwd() to the folder that contains the file, or move the file here.")
+}
+
+res <- read.csv("simulation_summary.csv", stringsAsFactors = FALSE) %>%
+  mutate(
+    pi = as.numeric(pi),
+    distribution = factor(distribution, levels = c("Poisson", "Gamma", "Student-t"))
+  )
+
+x_breaks <- sort(unique(res$pi))
+
+has_linewidth <- "linewidth" %in% names(formals(ggplot2::geom_line))
+LINE_ARG <- if (has_linewidth) "linewidth" else "size"
+
+line_arg <- function(value) setNames(list(value), LINE_ARG)
+
+out_dir <- "."
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+out_path <- function(fname) file.path(out_dir, fname)
+
+type1_long <- res %>%
+  select(distribution, pi, typeI_classic, typeI_HC3, typeI_perm) %>%
+  pivot_longer(
+    cols = c(typeI_classic, typeI_HC3, typeI_perm),
+    names_to = "method",
+    values_to = "type1"
+  ) %>%
+  mutate(
+    method = factor(
+      method,
+      levels = c("typeI_classic", "typeI_HC3", "typeI_perm"),
+      labels = c("Classic t", "HC3 robust t", "Permutation")
+    )
+  )
+
+p_type1 <- ggplot(type1_long, aes(x = pi, y = type1, color = method, linetype = method)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  do.call(geom_line, c(list(), line_arg(0.9))) +
+  geom_point(size = 2.2) +
+  facet_wrap(~ distribution) +
+  scale_x_continuous(breaks = x_breaks, labels = label_number(accuracy = 0.01, trim = TRUE)) +
+  coord_cartesian(ylim = c(0, 0.12)) +
+  labs(
+    title = "Appendix A: Type I error vs mixture proportion",
+    x = "Normal component proportion (π)",
+    y = "Type I error (α = 0.05)",
+    color = "Method",
+    linetype = "Method"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+figA <- out_path("figA_type1_vs_pi.png")
+ggsave(figA, p_type1, width = 7.2, height = 4.2, dpi = 300)
+cat("Saved:", figA, "\n")
+
+power_long <- res %>%
+  select(distribution, pi, power_classic, power_HC3, power_perm) %>%
+  pivot_longer(
+    cols = c(power_classic, power_HC3, power_perm),
+    names_to = "method",
+    values_to = "power"
+  ) %>%
+  mutate(
+    method = factor(
+      method,
+      levels = c("power_classic", "power_HC3", "power_perm"),
+      labels = c("Classic t", "HC3 robust t", "Permutation")
+    )
+  )
+
+p_power <- ggplot(power_long, aes(x = pi, y = power, color = method, linetype = method)) +
+  do.call(geom_line, c(list(), line_arg(0.9))) +
+  geom_point(size = 2.2) +
+  facet_wrap(~ distribution) +
+  scale_x_continuous(breaks = x_breaks, labels = label_number(accuracy = 0.01, trim = TRUE)) +
+  coord_cartesian(ylim = c(0.985, 1.0)) +
+  labs(
+    title = "Appendix B: Power vs mixture proportion",
+    x = "Normal component proportion (π)",
+    y = "Power",
+    color = "Method",
+    linetype = "Method"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+figB <- out_path("figB_power_vs_pi.png")
+ggsave(figB, p_power, width = 7.2, height = 4.2, dpi = 300)
+cat("Saved:", figB, "\n")
+
+p_out <- ggplot(res, aes(x = pi, y = outlier_frac, color = distribution, shape = distribution)) +
+  do.call(geom_line, c(list(), line_arg(0.9))) +
+  geom_point(size = 2.3) +
+  scale_x_continuous(breaks = x_breaks, labels = label_number(accuracy = 0.01, trim = TRUE)) +
+  labs(
+    title = "Appendix C: Proportion of studentized residuals |r| > 3",
+    x = "Normal component proportion (π)",
+    y = "Proportion |r| > 3",
+    color = "Alt distribution",
+    shape = "Alt distribution"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+figC <- out_path("figC_outliers_vs_pi.png")
+ggsave(figC, p_out, width = 7.2, height = 4.2, dpi = 300)
+cat("Saved:", figC, "\n")
+
+cat("\nAll done.\n")
+
+```
+
+
+
+
+```{r}
+
+simulate_condition_fast <- function(n, R, pi, alt, beta0, beta_vec, Sigma,
+phi_gamma, df_t, scale_t,
+alpha) {
+beta1_true <- beta_vec[1]
+
+out <- vector("list", R)
+for (r in 1:R) {
+X  <- make_X(n, Sigma)
+mu <- as.numeric(beta0 + X %*% beta_vec)
+
+y <- generate_y_mixture(
+  mu, pi = pi, alt = alt,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t
+)
+
+fit <- ols_stats(X, y, alpha = alpha)
+
+out[[r]] <- data.frame(
+  beta1_hat = fit$beta1_hat,
+  p_classic = fit$p_classic,
+  p_HC3     = fit$p_HC3,
+  cover_classic = (fit$ci_classic[1] <= beta1_true && beta1_true <= fit$ci_classic[2]),
+  cover_HC3     = (fit$ci_HC3[1]     <= beta1_true && beta1_true <= fit$ci_HC3[2]),
+  outlier_frac  = fit$outlier_frac
+)
+
+}
+
+dplyr::bind_rows(out)
+}
+
+```
+
+
+```{r}
+
+
+
+
+beta1_alt_small <- 0.10
+beta_alt_small  <- c(beta1_alt_small, rep(0, d - 1))
+
+
+summary_rows_small <- list()
+
+for (alt in alts) {
+for (pi in pi_vals) {
+
+sim_H1_small <- simulate_condition_fast(
+  n = n, R = R, pi = pi, alt = alt,
+  beta0 = beta0, beta_vec = beta_alt_small,
+  Sigma = Sigma,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t,
+  alpha = alpha
+)
+
+power_classic_small <- mean(sim_H1_small$p_classic < alpha)
+power_HC3_small     <- mean(sim_H1_small$p_HC3     < alpha)
+
+summary_rows_small[[length(summary_rows_small) + 1]] <- data.frame(
+  distribution = alt,
+  pi = pi,
+  beta1 = beta1_alt_small,
+  power_classic = power_classic_small,
+  power_HC3     = power_HC3_small
+)
+
+}
+}
+
+results_power_small <- dplyr::bind_rows(summary_rows_small) |>
+dplyr::mutate(
+distribution = factor(distribution,
+levels = c("poisson", "gamma", "t"),
+labels = c("Poisson", "Gamma", "Student-t"))
+)
+
+
+write.csv(results_power_small, "power_small_summary.csv", row.names = FALSE)
+
+results_power_small
+
+```
+
+
+```{r}
+
+
+
+
+power_big <- results |>
+dplyr::select(distribution, pi, power_classic, power_HC3) |>
+dplyr::mutate(beta1 = beta1_alt)
+
+power_small <- results_power_small |>
+dplyr::select(distribution, pi, power_classic, power_HC3, beta1)
+
+power_compare <- dplyr::bind_rows(power_big, power_small) |>
+tidyr::pivot_longer(
+cols = c(power_classic, power_HC3),
+names_to = "method",
+values_to = "power"
+) |>
+dplyr::mutate(
+method = factor(method,
+levels = c("power_classic", "power_HC3"),
+labels = c("Classic t", "HC3 robust t")),
+beta1 = factor(beta1, levels = c(beta1_alt, beta1_alt_small),
+labels = c(paste0("beta1=", beta1_alt),
+paste0("beta1=", beta1_alt_small)))
+)
+
+p_power_compare <- ggplot(power_compare,
+aes(x = pi, y = power, color = method, linetype = beta1, shape = beta1)) +
+geom_line(linewidth = 0.9) +
+geom_point(size = 2.2) +
+facet_wrap(~ distribution) +
+scale_x_continuous(breaks = x_breaks, labels = scales::label_number(accuracy = 0.01, trim = TRUE)) +
+coord_cartesian(ylim = c(0, 1)) +
+labs(
+title = "Appendix B (revised): Power vs mixture proportion (two effect sizes)",
+subtitle = "Compare a saturated setting (beta1=0.5) with a non-saturated setting (beta1=0.1)",
+x = "Normal component proportion (π)",
+y = "Power",
+color = "Method",
+linetype = "Effect size",
+shape = "Effect size"
+) +
+theme_bw(base_size = 13) +
+theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+
+ggsave("figB_power_vs_pi.png", p_power_compare, width = 8.0, height = 4.8, dpi = 300)
+
+```
+
+
+```{r}
+
+simulate_condition_fast_se <- function(n, R, pi, alt, beta0, beta_vec, Sigma,
+phi_gamma, df_t, scale_t,
+alpha) {
+beta1_true <- beta_vec[1]
+
+out <- vector("list", R)
+for (r in 1:R) {
+X  <- make_X(n, Sigma)
+mu <- as.numeric(beta0 + X %*% beta_vec)
+
+y <- generate_y_mixture(
+  mu, pi = pi, alt = alt,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t
+)
+
+fit <- ols_stats(X, y, alpha = alpha)
+
+out[[r]] <- data.frame(
+  beta1_hat   = fit$beta1_hat,
+  se_classic  = fit$se_classic,
+  se_HC3      = fit$se_HC3,
+  p_classic   = fit$p_classic,
+  p_HC3       = fit$p_HC3,
+  cover_classic = (fit$ci_classic[1] <= beta1_true && beta1_true <= fit$ci_classic[2]),
+  cover_HC3     = (fit$ci_HC3[1]     <= beta1_true && beta1_true <= fit$ci_HC3[2]),
+  outlier_frac  = fit$outlier_frac
+)
+
+}
+
+dplyr::bind_rows(out)
+}
+
+```
+
+
+
+```{r}
+simulate_condition_fast_se <- function(n, R, pi, alt, beta0, beta_vec, Sigma,
+phi_gamma, df_t, scale_t,
+alpha) {
+beta1_true <- beta_vec[1]
+
+
+scalar <- function(x, default = NA_real_) {
+if (is.null(x) || length(x) == 0) return(default)
+x[1]
+}
+
+
+ci2 <- function(x) {
+if (is.null(x) || length(x) != 2) return(c(NA_real_, NA_real_))
+as.numeric(x)
+}
+
+out <- vector("list", R)
+
+for (r in 1:R) {
+
+X  <- make_X(n, Sigma)
+mu <- as.numeric(beta0 + X %*% beta_vec)
+
+if (alt %in% c("poisson", "gamma")) {
+  tries <- 0
+  while (any(mu <= 0) && tries < 50) {
+    X  <- make_X(n, Sigma)
+    mu <- as.numeric(beta0 + X %*% beta_vec)
+    tries <- tries + 1
+  }
+  if (any(mu <= 0)) mu <- pmax(mu, 1e-6)
+}
+
+y <- generate_y_mixture(
+  mu, pi = pi, alt = alt,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t
+)
+
+fit <- ols_stats(X, y, alpha = alpha)
+
+ci_classic <- ci2(fit$ci_classic)
+ci_HC3     <- ci2(fit$ci_HC3)
+
+df <- n - ncol(X) - 1
+tcrit <- qt(1 - alpha/2, df = df)
+
+se_classic <- (ci_classic[2] - ci_classic[1]) / (2 * tcrit)
+se_HC3     <- (ci_HC3[2]     - ci_HC3[1])     / (2 * tcrit)
+
+cover_classic <- ifelse(any(is.na(ci_classic)), NA,
+                        (ci_classic[1] <= beta1_true && beta1_true <= ci_classic[2]))
+cover_HC3 <- ifelse(any(is.na(ci_HC3)), NA,
+                    (ci_HC3[1] <= beta1_true && beta1_true <= ci_HC3[2]))
+
+out[[r]] <- data.frame(
+  beta1_hat  = scalar(fit$beta1_hat),
+  se_classic = se_classic,
+  se_HC3     = se_HC3,
+  p_classic  = scalar(fit$p_classic),
+  p_HC3      = scalar(fit$p_HC3),
+  cover_classic = cover_classic,
+  cover_HC3     = cover_HC3,
+  outlier_frac  = scalar(fit$outlier_frac)
+)
+
+}
+
+dplyr::bind_rows(out)
+}
+
+```
+
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+
+
+simulate_condition_fast_se <- function(n, R, pi, alt, beta0, beta_vec, Sigma,
+phi_gamma, df_t, scale_t,
+alpha) {
+beta1_true <- beta_vec[1]
+
+scalar <- function(x, default = NA_real_) {
+if (is.null(x) || length(x) == 0) return(default)
+x[1]
+}
+
+ci2 <- function(x) {
+if (is.null(x) || length(x) != 2) return(c(NA_real_, NA_real_))
+as.numeric(x)
+}
+
+out <- vector("list", R)
+
+for (r in 1:R) {
+X  <- make_X(n, Sigma)
+mu <- as.numeric(beta0 + X %*% beta_vec)
+
+if (alt %in% c("poisson", "gamma")) {
+  tries <- 0
+  while (any(mu <= 0) && tries < 50) {
+    X  <- make_X(n, Sigma)
+    mu <- as.numeric(beta0 + X %*% beta_vec)
+    tries <- tries + 1
+  }
+  if (any(mu <= 0)) mu <- pmax(mu, 1e-6)
+}
+
+y <- generate_y_mixture(
+  mu, pi = pi, alt = alt,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t
+)
+
+fit <- ols_stats(X, y, alpha = alpha)
+
+ci_classic <- ci2(fit$ci_classic)
+ci_HC3     <- ci2(fit$ci_HC3)
+
+df <- n - ncol(X) - 1
+tcrit <- qt(1 - alpha/2, df = df)
+
+se_classic <- (ci_classic[2] - ci_classic[1]) / (2 * tcrit)
+se_HC3     <- (ci_HC3[2]     - ci_HC3[1])     / (2 * tcrit)
+
+cover_classic <- ifelse(any(is.na(ci_classic)), NA,
+                        (ci_classic[1] <= beta1_true && beta1_true <= ci_classic[2]))
+cover_HC3 <- ifelse(any(is.na(ci_HC3)), NA,
+                    (ci_HC3[1] <= beta1_true && beta1_true <= ci_HC3[2]))
+
+out[[r]] <- data.frame(
+  beta1_hat  = scalar(fit$beta1_hat),
+  se_classic = se_classic,
+  se_HC3     = se_HC3,
+  p_classic  = scalar(fit$p_classic),
+  p_HC3      = scalar(fit$p_HC3),
+  cover_classic = cover_classic,
+  cover_HC3     = cover_HC3,
+  outlier_frac  = scalar(fit$outlier_frac)
+)
+
+}
+
+bind_rows(out)
+}
+
+```
+
+
+
+```{r}
+
+
+
+
+
+
+
+
+
+stopifnot(exists("alts"), exists("pi_vals"), exists("d"), exists("beta0"),
+exists("Sigma"), exists("phi_gamma"), exists("df_t"), exists("scale_t"),
+exists("alpha"), exists("n"), exists("R"))
+
+beta1_alt_small <- 0.10
+beta_alt_small  <- c(beta1_alt_small, rep(0, d - 1))
+
+rows_power_small <- list()
+rows_sesd_small  <- list()
+
+for (alt in alts) {
+for (pi in pi_vals) {
+
+sim_H1_small <- simulate_condition_fast_se(
+  n = n, R = R, pi = pi, alt = alt,
+  beta0 = beta0, beta_vec = beta_alt_small,
+  Sigma = Sigma,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t,
+  alpha = alpha
+)
+
+pow_c <- mean(sim_H1_small$p_classic < alpha)
+pow_h <- mean(sim_H1_small$p_HC3     < alpha)
+
+se_pow_c <- sqrt(pow_c * (1 - pow_c) / R)
+se_pow_h <- sqrt(pow_h * (1 - pow_h) / R)
+
+rows_power_small[[length(rows_power_small) + 1]] <- data.frame(
+  distribution = alt,
+  pi = pi,
+  beta1 = beta1_alt_small,
+  power_classic = pow_c,
+  power_HC3     = pow_h,
+  mcse_classic  = se_pow_c,
+  mcse_HC3      = se_pow_h,
+  lo_classic    = max(0, pow_c - 1.96 * se_pow_c),
+  hi_classic    = min(1, pow_c + 1.96 * se_pow_c),
+  lo_HC3        = max(0, pow_h - 1.96 * se_pow_h),
+  hi_HC3        = min(1, pow_h + 1.96 * se_pow_h)
+)
+
+sd_bhat   <- sd(sim_H1_small$beta1_hat)
+mean_se_c <- mean(sim_H1_small$se_classic)
+mean_se_h <- mean(sim_H1_small$se_HC3)
+
+rows_sesd_small[[length(rows_sesd_small) + 1]] <- data.frame(
+  distribution = alt,
+  pi = pi,
+  beta1 = beta1_alt_small,
+  sd_beta1_hat = sd_bhat,
+  mean_se_classic = mean_se_c,
+  mean_se_HC3     = mean_se_h,
+  ratio_sd_over_meanse_classic = sd_bhat / mean_se_c,
+  ratio_sd_over_meanse_HC3     = sd_bhat / mean_se_h
+)
+
+}
+}
+
+results_power_small <- bind_rows(rows_power_small) |>
+mutate(
+pi = as.numeric(pi),
+distribution = factor(distribution,
+levels = c("poisson", "gamma", "t"),
+labels = c("Poisson", "Gamma", "Student-t"))
+) |>
+arrange(distribution, pi)
+
+results_sesd_small <- bind_rows(rows_sesd_small) |>
+mutate(
+pi = as.numeric(pi),
+distribution = factor(distribution,
+levels = c("poisson", "gamma", "t"),
+labels = c("Poisson", "Gamma", "Student-t"))
+) |>
+arrange(distribution, pi)
+
+write.csv(results_power_small, "power_small_summary_with_mc.csv", row.names = FALSE)
+write.csv(results_sesd_small,  "sesd_small_summary.csv", row.names = FALSE)
+
+results_power_small
+
+```
+
+
+
+```{r}
+
+
+
+
+
+
+
+
+
+stopifnot(exists("alts"), exists("pi_vals"), exists("d"), exists("beta0"),
+exists("Sigma"), exists("phi_gamma"), exists("df_t"), exists("scale_t"),
+exists("alpha"), exists("n"), exists("R"))
+
+beta1_alt_small <- 0.10
+beta_alt_small  <- c(beta1_alt_small, rep(0, d - 1))
+
+rows_power_small <- list()
+rows_sesd_small  <- list()
+
+for (alt in alts) {
+for (pi in pi_vals) {
+
+sim_H1_small <- simulate_condition_fast_se(
+  n = n, R = R, pi = pi, alt = alt,
+  beta0 = beta0, beta_vec = beta_alt_small,
+  Sigma = Sigma,
+  phi_gamma = phi_gamma, df_t = df_t, scale_t = scale_t,
+  alpha = alpha
+)
+
+pow_c <- mean(sim_H1_small$p_classic < alpha)
+pow_h <- mean(sim_H1_small$p_HC3     < alpha)
+
+se_pow_c <- sqrt(pow_c * (1 - pow_c) / R)
+se_pow_h <- sqrt(pow_h * (1 - pow_h) / R)
+
+rows_power_small[[length(rows_power_small) + 1]] <- data.frame(
+  distribution = alt,
+  pi = pi,
+  beta1 = beta1_alt_small,
+  power_classic = pow_c,
+  power_HC3     = pow_h,
+  mcse_classic  = se_pow_c,
+  mcse_HC3      = se_pow_h,
+  lo_classic    = max(0, pow_c - 1.96 * se_pow_c),
+  hi_classic    = min(1, pow_c + 1.96 * se_pow_c),
+  lo_HC3        = max(0, pow_h - 1.96 * se_pow_h),
+  hi_HC3        = min(1, pow_h + 1.96 * se_pow_h)
+)
+
+sd_bhat   <- sd(sim_H1_small$beta1_hat)
+mean_se_c <- mean(sim_H1_small$se_classic)
+mean_se_h <- mean(sim_H1_small$se_HC3)
+
+rows_sesd_small[[length(rows_sesd_small) + 1]] <- data.frame(
+  distribution = alt,
+  pi = pi,
+  beta1 = beta1_alt_small,
+  sd_beta1_hat = sd_bhat,
+  mean_se_classic = mean_se_c,
+  mean_se_HC3     = mean_se_h,
+  ratio_sd_over_meanse_classic = sd_bhat / mean_se_c,
+  ratio_sd_over_meanse_HC3     = sd_bhat / mean_se_h
+)
+
+}
+}
+
+results_power_small <- bind_rows(rows_power_small) |>
+mutate(
+pi = as.numeric(pi),
+distribution = factor(distribution,
+levels = c("poisson", "gamma", "t"),
+labels = c("Poisson", "Gamma", "Student-t"))
+) |>
+arrange(distribution, pi)
+
+results_sesd_small <- bind_rows(rows_sesd_small) |>
+mutate(
+pi = as.numeric(pi),
+distribution = factor(distribution,
+levels = c("poisson", "gamma", "t"),
+labels = c("Poisson", "Gamma", "Student-t"))
+) |>
+arrange(distribution, pi)
+
+write.csv(results_power_small, "power_small_summary_with_mc.csv", row.names = FALSE)
+write.csv(results_sesd_small,  "sesd_small_summary.csv", row.names = FALSE)
+
+results_power_small
+
+```
+
+
+```{r}
+
+
+
+
+power_long_mc <- results_power_small |>
+select(distribution, pi, power_classic, power_HC3,
+lo_classic, hi_classic, lo_HC3, hi_HC3) |>
+pivot_longer(cols = c(power_classic, power_HC3),
+names_to = "method", values_to = "power") |>
+mutate(
+lo = ifelse(method == "power_classic", lo_classic, lo_HC3),
+hi = ifelse(method == "power_classic", hi_classic, hi_HC3),
+method = factor(method,
+levels = c("power_classic", "power_HC3"),
+labels = c("Classic t", "HC3 robust t"))
+)
+
+x_breaks <- sort(unique(power_long_mc$pi))
+
+p_power_mc <- ggplot(power_long_mc,
+aes(x = pi, y = power, color = method, group = method)) +
+geom_errorbar(aes(ymin = lo, ymax = hi),
+width = 0.03,
+position = position_dodge(width = 0.06)) +
+geom_line(linewidth = 0.9, position = position_dodge(width = 0.06)) +
+geom_point(size = 2.2, position = position_dodge(width = 0.06)) +
+facet_wrap(~ distribution) +
+scale_x_continuous(breaks = x_breaks,
+labels = label_number(accuracy = 0.01, trim = TRUE)) +
+coord_cartesian(ylim = c(0, 1)) +
+labs(
+title = "Appendix B (revised): Power vs mixture proportion (beta1 = 0.1)",
+subtitle = paste0("Error bars: Monte Carlo 95% intervals (R = ", R, ")"),
+x = "Normal component proportion (π)",
+y = "Power",
+color = "Method"
+) +
+theme_bw(base_size = 13) +
+theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+ggsave("figB_power_vs_pi.png", p_power_mc, width = 8.0, height = 4.8, dpi = 300)
+
+p_power_mc
+
+```
+
+
+```{r}
+
+
+
+kable(results_sesd_small,
+digits = 3,
+caption = "Appendix Table: SD(beta1_hat) and mean(SE) at beta1=0.1, with ratios SD/mean(SE).")
+
+```
+
+
+
+```{r}
+library(dplyr)
+
+power <- read.csv("power_small_summary_with_mc.csv")
+sesd  <- read.csv("sesd_small_summary.csv")
+
+stopifnot(all(power$power_classic >= 0 & power$power_classic <= 1))
+stopifnot(all(power$power_HC3     >= 0 & power$power_HC3     <= 1))
+stopifnot(all(power$lo_classic <= power$power_classic & power$power_classic <= power$hi_classic))
+stopifnot(all(power$lo_HC3     <= power$power_HC3     & power$power_HC3     <= power$hi_HC3))
+
+Rhat_c <- with(power, power_classic * (1 - power_classic) / (mcse_classic^2))
+Rhat_h <- with(power, power_HC3     * (1 - power_HC3)     / (mcse_HC3^2))
+summary(Rhat_c); summary(Rhat_h)
+
+power %>%
+  arrange(distribution, pi) %>%
+  group_by(distribution) %>%
+  summarise(
+    mono_classic = all(diff(power_classic) >= -0.02),
+    mono_HC3     = all(diff(power_HC3)     >= -0.02)
+  )
+
+p1 <- power %>% filter(pi == 1)
+p1
+
+sesd %>%
+  arrange(distribution, pi) %>%
+  group_by(distribution) %>%
+  summarise(
+    corr_sd_pi = cor(pi, sd_beta1_hat),
+    corr_ratio_pi_classic = cor(pi, ratio_sd_over_meanse_classic),
+    corr_ratio_pi_HC3     = cor(pi, ratio_sd_over_meanse_HC3)
+  )
+
+```
+
+```{r}
+read.csv("power_small_summary_with_mc.csv") |>
+  dplyr::filter(distribution == "Gamma") |>
+  dplyr::arrange(pi) |>
+  dplyr::select(pi, power_classic, power_HC3)
+
+```
